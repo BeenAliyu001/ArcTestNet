@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import Header from './components/header';
+import Header from './components/Header';
 import FxSwapCard from './components/FxSwapCard';
 import SettlementHistory from './components/SettlementHistory';
 import FxMarketPanel from './components/FxMarketPanel';
+import FxChartCard from './components/FxChartCard';
 import { useArcWallet } from './hooks/useArcWallet';
 import { useTokenBalances } from './hooks/useTokenBalances';
 
@@ -11,7 +12,6 @@ export default function App() {
   const { balances, refetchBalances } = useTokenBalances(wallet.account);
   const [transactions, setTransactions] = useState([]);
 
-  // Callback to register real swap transactions into history
   const handleSwapSuccess = (txData) => {
     refetchBalances();
     if (txData) {
@@ -24,7 +24,7 @@ export default function App() {
       <Header wallet={wallet} />
 
       <main className="max-w-7xl mx-auto p-6 space-y-6">
-        {/* Top Balance Summary Bar */}
+        {/* Balances Summary Banner */}
         {wallet.account && (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="bg-arc-card border border-arc-border p-4 rounded-lg flex justify-between items-center shadow-sm">
@@ -49,10 +49,11 @@ export default function App() {
           </div>
         )}
 
-        {/* Main Institutional Layout Grid */}
+        {/* Dashboard Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             <FxSwapCard wallet={wallet} balances={balances} onSwapSuccess={handleSwapSuccess} />
+            <FxChartCard />
             <SettlementHistory transactions={transactions} />
           </div>
 
