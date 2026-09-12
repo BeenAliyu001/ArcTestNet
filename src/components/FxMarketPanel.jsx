@@ -93,7 +93,7 @@ export default function FxMarketPanel({ wallet }) {
                 ? 'Loading…'
                 : rateError
                 ? 'Unavailable'
-                : `${rate.toFixed(4)} EURC`}
+                : `${rate} EURC`}
             </span>
           </div>
           <div className="bg-arc-bg p-3 rounded border border-arc-border">
