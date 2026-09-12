@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import  { useState } from 'react';
 import Header from './components/Header';
 import FxSwapCard from './components/FxSwapCard';
 import SettlementHistory from './components/SettlementHistory';

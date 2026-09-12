@@ -1,114 +1,79 @@
-import { useState, useEffect, useCallback } from 'react';
-import { ARC_TESTNET_PARAMS } from '../constants/arcNetwork';
+// src/hooks/useWallet.js
+// Bridges services/wallet.js (plain functions) into React state, in the
+// shape FxSwapCard/Header already expect: { account, isCorrectNetwork,
+// connectWallet, disconnectWallet, switchToArcTestnet, isConnecting }.
+
+import { useCallback, useEffect, useState } from "react";
+import {
+  connectWallet as connectWalletService,
+  disconnectWallet as disconnectWalletService,
+  switchToArcTestnet as switchToArcTestnetService,
+  isOnArcTestnet,
+  subscribeToWalletEvents,
+} from "../services/wallet.js";
+import { ARC_TESTNET } from "../config/arc.js";
 
 export function useArcWallet() {
   const [account, setAccount] = useState(null);
-  const [chainId, setChainId] = useState(null);
   const [isCorrectNetwork, setIsCorrectNetwork] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState(null);
 
-  // Helper function to check if connected to Arc Testnet
-  const checkNetwork = (currentChainId) => {
-    const isArc = currentChainId?.toLowerCase() === ARC_TESTNET_PARAMS.chainId.toLowerCase();
-    setIsCorrectNetwork(isArc);
-    return isArc;
-  };
-
-  // Switch network or add Arc Testnet to user's wallet
-  const switchToArcTestnet = async () => {
-    if (!window.ethereum) return;
-    try {
-      // Attempt to switch to Arc Testnet
-      await window.ethereum.request({
-        method: 'wallet_switchEthereumChain',
-        params: [{ chainId: ARC_TESTNET_PARAMS.chainId }],
-      });
-    } catch (switchError) {
-      // Error code 4902 indicates the chain has not been added to MetaMask
-      if (switchError.code === 4902) {
-        try {
-          await window.ethereum.request({
-            method: 'wallet_addEthereumChain',
-            params: [ARC_TESTNET_PARAMS],
-          });
-        } catch (addError) {
-          setError('Failed to add Arc Testnet to wallet');
-        }
-      } else {
-        setError('Failed to switch network to Arc Testnet');
-      }
-    }
-  };
-
-  // Connect wallet handler
-  const connectWallet = async () => {
-    if (!window.ethereum) {
-      setError('No EVM wallet detected. Please install MetaMask or Rabby.');
-      return;
-    }
-
+  const connectWallet = useCallback(async () => {
     setIsConnecting(true);
     setError(null);
-
     try {
-      // Request accounts from provider
-      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-      const currentChain = await window.ethereum.request({ method: 'eth_chainId' });
-
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-        setChainId(currentChain);
-        const correct = checkNetwork(currentChain);
-
-        // Prompt network switch if connected to wrong chain
-        if (!correct) {
-          await switchToArcTestnet();
-        }
-      }
+      const { address, chainId } = await connectWalletService();
+      setAccount(address);
+      setIsCorrectNetwork(chainId === ARC_TESTNET.chainId);
     } catch (err) {
-      setError(err.message || 'Failed to connect wallet');
+      setError(err.message ?? String(err));
     } finally {
       setIsConnecting(false);
     }
-  };
-
-  // Disconnect wallet handler
-  const disconnectWallet = () => {
-    setAccount(null);
-    setChainId(null);
-    setIsCorrectNetwork(false);
-  };
-
-  // Listen for account and chain changes automatically
-  useEffect(() => {
-    if (!window.ethereum) return;
-
-    const handleAccountsChanged = (accounts) => {
-      if (accounts.length > 0) {
-        setAccount(accounts[0]);
-      } else {
-        disconnectWallet();
-      }
-    };
-
-    const handleChainChanged = (newChainId) => {
-      setChainId(newChainId);
-      checkNetwork(newChainId);
-    };
-
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    window.ethereum.on('chainChanged', handleChainChanged);
-
-    return () => {
-      window.ethereum.removeListener('accountsChanged', handleAccountsChanged);
-      window.ethereum.removeListener('chainChanged', handleChainChanged);
-    };
   }, []);
+
+  const disconnectWallet = useCallback(() => {
+    disconnectWalletService();
+    setAccount(null);
+    setIsCorrectNetwork(false);
+  }, []);
+
+  const switchToArcTestnet = useCallback(async () => {
+    setError(null);
+    try {
+      await switchToArcTestnetService();
+      const onArc = await isOnArcTestnet();
+      setIsCorrectNetwork(onArc);
+    } catch (err) {
+      setError(err.message ?? String(err));
+    }
+  }, []);
+
+  // React to account/network changes made from inside the wallet extension
+  // itself (not triggered by this app's own buttons).
+  useEffect(() => {
+    if (!account) return undefined;
+
+    const unsubscribe = subscribeToWalletEvents({
+      onAccountsChanged: (accounts) => {
+        if (accounts.length === 0) {
+          setAccount(null);
+          setIsCorrectNetwork(false);
+        } else {
+          setAccount(accounts[0]);
+        }
+      },
+      onChainChanged: (chainId) => {
+        setIsCorrectNetwork(chainId === ARC_TESTNET.chainId);
+      },
+    });
+
+    return unsubscribe;
+  }, [account]);
 
   return {
     account,
-    chainId,
     isCorrectNetwork,
     isConnecting,
     error,

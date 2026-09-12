@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 // Institutional Lightweight Chart Component
 export default function FxChartCard() {

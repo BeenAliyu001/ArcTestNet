@@ -1,111 +1,127 @@
-import React, { useState } from 'react';
-import { ethers } from 'ethers';
-import { ARC_TOKENS, ARC_TESTNET_PARAMS, ARC_ROUTER_ADDRESS } from '../constants/arcNetwork';
+import  { useState, useRef } from 'react';
+import { ARC_TOKENS, ARC_TESTNET_PARAMS } from '../constants/arcNetwork';
+import { getQuote, executeSwap } from '../services/swap';
+import { getBalances } from '../services/balances';
 
-export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
+// Debounce quote requests while the user is still typing.
+const QUOTE_DEBOUNCE_MS = 400;
+
+export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalancesRefresh }) {
   const { account, isCorrectNetwork } = wallet;
 
-  // Form & Transaction States
   const [payAmount, setPayAmount] = useState('');
   const [quote, setQuote] = useState(null);
   const [isGettingQuote, setIsGettingQuote] = useState(false);
-  const [txStatus, setTxStatus] = useState('IDLE'); // IDLE | APPROVING | SUBMITTING | CONFIRMING | SETTLED | FAILED
+  const [txStatus, setTxStatus] = useState('IDLE'); // IDLE | PREPARING | AWAITING_APPROVAL | SUBMITTED | CONFIRMING | SETTLED | FAILED
   const [txHash, setTxHash] = useState(null);
+  const [explorerUrl, setExplorerUrl] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
 
-  // Phase 4: Fetch Real FX Quote
-  const handleAmountChange = async (e) => {
+  const debounceRef = useRef(null);
+  const quoteRequestId = useRef(0);
+
+  // Phase 4: Real FX Quote — via App Kit's estimateSwap, never a frontend calculation.
+  const handleAmountChange = (e) => {
     const val = e.target.value;
     setPayAmount(val);
     setErrorMsg(null);
+    setQuote(null);
+
+    if (debounceRef.current) clearTimeout(debounceRef.current);
 
     if (!val || Number(val) <= 0) {
-      setQuote(null);
       return;
     }
 
+    debounceRef.current = setTimeout(() => fetchQuote(val), QUOTE_DEBOUNCE_MS);
+  };
+
+  const fetchQuote = async (amount) => {
+    const requestId = ++quoteRequestId.current;
     setIsGettingQuote(true);
     try {
-      // 1 USDC = 0.9215 EURC (Institutional FX Rate)
-      const estimatedReceive = (Number(val) * 0.9215).toFixed(2);
-      const estimatedFee = (Number(val) * 0.001).toFixed(2);
+      const result = await getQuote({
+        tokenIn: 'USDC',
+        tokenOut: 'EURC',
+        amountIn: amount,
+      });
+
+      // Ignore stale responses if the user kept typing.
+      if (requestId !== quoteRequestId.current) return;
 
       setQuote({
-        rate: '0.9215',
-        receiveAmount: estimatedReceive,
-        fee: estimatedFee,
-        slippage: '0.1%',
+        rate: (Number(result.estimatedOutput.amount) / Number(amount)).toFixed(4),
+        receiveAmount: result.estimatedOutput.amount,
+        minReceived: result.stopLimit?.amount,
+        fees: result.fees, // [{ token, amount, type }]
       });
     } catch (err) {
-      setErrorMsg('Failed to fetch quote from Arc router.');
+      if (requestId !== quoteRequestId.current) return;
+      setErrorMsg(quoteErrorMessage(err));
     } finally {
-      setIsGettingQuote(false);
+      if (requestId === quoteRequestId.current) setIsGettingQuote(false);
     }
   };
 
-  // Phase 5 & 6: Execute Real Swap Transaction on Arc Testnet
+  // Phase 5 & 6: Execute the real swap through App Kit; the connected wallet signs it.
   const handleExecuteSwap = async () => {
     if (!account) return;
     if (!isCorrectNetwork) {
       setErrorMsg('Please switch your wallet network to Arc Testnet.');
       return;
     }
+    if (!quote) return;
 
     setErrorMsg(null);
-    setTxStatus('APPROVING');
+    setTxHash(null);
+    setExplorerUrl(null);
+    setTxStatus('PREPARING');
 
     try {
-      const provider = new ethers.BrowserProvider(window.ethereum);
-      const signer = await provider.getSigner();
-
-      setTxStatus('SUBMITTING');
-
-      // Send real EVM transaction to Arc Testnet
-      const parsedAmount = ethers.parseUnits(payAmount, ARC_TOKENS.USDC.decimals);
-
-      // Perform transaction via wallet provider
-      const tx = await signer.sendTransaction({
-        to: ARC_ROUTER_ADDRESS !== '0x0000000000000000000000000000000000000000' 
-          ? ARC_ROUTER_ADDRESS 
-          : account, // Fallback to self transaction for local testing
-        value: 0n,
-        data: '0x', // Replace with encoded Arc App Kit swap bytecode
+      setTxStatus('AWAITING_APPROVAL'); // wallet signature prompt happens inside executeSwap
+      const result = await executeSwap({
+        tokenIn: 'USDC',
+        tokenOut: 'EURC',
+        amountIn: payAmount,
       });
 
+      setTxStatus('SUBMITTED');
+      setTxHash(result.txHash);
+      setExplorerUrl(result.explorerUrl);
+
       setTxStatus('CONFIRMING');
-      setTxHash(tx.hash);
+      // App Kit's swap() already waits for settlement before resolving, so
+      // by the time we're here the result reflects the final state.
+      const settled = result.status === 'DONE' || result.substatus === 'COMPLETED';
+      setTxStatus(settled ? 'SETTLED' : 'FAILED');
+      if (!settled) {
+        setErrorMsg('Swap did not reach a settled state. Check the transaction on the explorer.');
+      }
 
-      // Wait for block confirmation on Arc Testnet
-      await tx.wait(1);
-
-      setTxStatus('SETTLED');
-
-      // Construct transaction audit payload for Settlement History table
       const newTxRecord = {
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
         pair: 'USDC / EURC',
-        paid: `${payAmount} USDC`,
-        received: `${quote.receiveAmount} EURC`,
+        paid: `${result.amountIn ?? payAmount} USDC`,
+        received: `${result.amountOut ?? quote.receiveAmount} EURC`,
         rate: quote.rate,
-        status: 'SETTLED',
-        hash: tx.hash,
+        status: settled ? 'SETTLED' : 'FAILED',
+        hash: result.txHash,
       };
+      onSwapSuccess?.(newTxRecord);
 
-      // Notify parent component to update balances and push record to history
-      if (onSwapSuccess) {
-        onSwapSuccess(newTxRecord);
+      // Phase 3: refresh real balances after a successful transaction.
+      if (settled) {
+        const fresh = await getBalances(account);
+        onBalancesRefresh?.(fresh);
       }
     } catch (err) {
       console.error('Swap Execution Error:', err);
       setTxStatus('FAILED');
-
-      if (err.code === 'ACTION_REJECTED' || err.code === 4001) {
-        setErrorMsg('Transaction rejected by user in wallet.');
-      } else {
-        setErrorMsg(err.message || 'Transaction execution failed on Arc Testnet.');
-      }
+      setErrorMsg(swapErrorMessage(err));
     }
   };
+
+  const isBusy = !['IDLE', 'SETTLED', 'FAILED'].includes(txStatus);
 
   return (
     <div className="bg-arc-card border border-arc-border rounded-lg p-6 shadow-xl">
@@ -123,7 +139,7 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
       <div className="bg-arc-bg border border-arc-border rounded p-4 mb-3">
         <div className="flex justify-between text-xs font-mono text-arc-textMuted mb-2">
           <span>YOU PAY</span>
-          <span>BALANCE: {balances.USDC} USDC</span>
+          <span>BALANCE: {balances[ARC_TOKENS.USDC.symbol]} USDC</span>
         </div>
         <div className="flex items-center space-x-3">
           <input
@@ -131,7 +147,7 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
             placeholder="0.00"
             value={payAmount}
             onChange={handleAmountChange}
-            disabled={txStatus !== 'IDLE' && txStatus !== 'SETTLED' && txStatus !== 'FAILED'}
+            disabled={isBusy}
             className="w-full bg-transparent text-2xl font-mono text-arc-textBright outline-none"
           />
           <div className="bg-arc-card px-3 py-1.5 rounded border border-arc-border text-xs font-mono font-bold text-arc-textBright">
@@ -151,13 +167,13 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
       <div className="bg-arc-bg border border-arc-border rounded p-4 mb-4">
         <div className="flex justify-between text-xs font-mono text-arc-textMuted mb-2">
           <span>YOU RECEIVE (ESTIMATED)</span>
-          <span>BALANCE: {balances.EURC} EURC</span>
+          <span>BALANCE: {balances[ARC_TOKENS.EURC.symbol]} EURC</span>
         </div>
         <div className="flex items-center space-x-3">
           <input
             type="text"
             readOnly
-            value={isGettingQuote ? 'Calculating...' : quote ? quote.receiveAmount : '0.00'}
+            value={isGettingQuote ? 'Fetching real quote…' : quote ? quote.receiveAmount : '0.00'}
             className="w-full bg-transparent text-2xl font-mono text-arc-green outline-none"
           />
           <div className="bg-arc-card px-3 py-1.5 rounded border border-arc-border text-xs font-mono font-bold text-arc-textBright">
@@ -166,21 +182,25 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
         </div>
       </div>
 
-      {/* Live Quote Breakdown */}
+      {/* Live Quote Breakdown — real numbers from App Kit's estimateSwap */}
       {quote && (
         <div className="bg-arc-bg/60 border border-arc-border rounded p-3 mb-4 space-y-1.5 text-xs font-mono">
           <div className="flex justify-between text-arc-textMuted">
             <span>EXCHANGE RATE</span>
-            <span className="text-arc-textBright">1 USDC = {quote.rate} EURC</span>
+            <span className="text-arc-textBright">1 USDC ≈ {quote.rate} EURC</span>
           </div>
-          <div className="flex justify-between text-arc-textMuted">
-            <span>NETWORK FEE</span>
-            <span className="text-arc-textBright">{quote.fee} USDC</span>
-          </div>
-          <div className="flex justify-between text-arc-textMuted">
-            <span>SLIPPAGE TOLERANCE</span>
-            <span className="text-arc-textBright">{quote.slippage}</span>
-          </div>
+          {quote.fees?.map((fee, i) => (
+            <div key={i} className="flex justify-between text-arc-textMuted">
+              <span>{fee.type === 'gas' ? 'NETWORK FEE' : 'PROVIDER FEE'}</span>
+              <span className="text-arc-textBright">{fee.amount} {fee.token}</span>
+            </div>
+          ))}
+          {quote.minReceived && (
+            <div className="flex justify-between text-arc-textMuted">
+              <span>MIN RECEIVED</span>
+              <span className="text-arc-textBright">{quote.minReceived} EURC</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -190,10 +210,10 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
           <div className="flex items-center justify-between">
             <span className="text-arc-textMuted">TRANSACTION STATE:</span>
             <span className={`font-bold ${
-              txStatus === 'SETTLED' ? 'text-arc-green' : 
+              txStatus === 'SETTLED' ? 'text-arc-green' :
               txStatus === 'FAILED' ? 'text-arc-red' : 'text-arc-accent animate-pulse'
             }`}>
-              {txStatus}
+              {txStatus.replace('_', ' ')}
             </span>
           </div>
         </div>
@@ -217,11 +237,11 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
       ) : (
         <button
           onClick={handleExecuteSwap}
-          disabled={!quote || Number(payAmount) <= 0 || (txStatus !== 'IDLE' && txStatus !== 'SETTLED' && txStatus !== 'FAILED')}
+          disabled={!quote || Number(payAmount) <= 0 || isBusy}
           className="w-full bg-arc-accent hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-arc-accent text-white font-mono py-3 rounded text-xs font-bold uppercase transition-colors"
         >
-          {txStatus === 'APPROVING' ? 'APPROVING IN WALLET...' :
-           txStatus === 'SUBMITTING' ? 'SUBMITTING TO ARC...' :
+          {txStatus === 'AWAITING_APPROVAL' ? 'APPROVE IN WALLET...' :
+           txStatus === 'SUBMITTED' ? 'SUBMITTED TO ARC...' :
            txStatus === 'CONFIRMING' ? 'CONFIRMING ON ARC TESTNET...' :
            'EXECUTE SWAP'}
         </button>
@@ -236,7 +256,7 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
           </div>
           <div className="text-right mt-2">
             <a
-              href={`${ARC_TESTNET_PARAMS.blockExplorerUrls[0]}/tx/${txHash}`}
+              href={explorerUrl ?? `${ARC_TESTNET_PARAMS.blockExplorerUrls[0]}/tx/${txHash}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-arc-accent hover:underline text-xs"
@@ -248,4 +268,24 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
       )}
     </div>
   );
+}
+
+function quoteErrorMessage(err) {
+  switch (err?.code) {
+    case 'route_unavailable': return 'No swap route available right now — Arc Testnet liquidity may be thin.';
+    case 'network_error': return 'Network error while fetching quote. Try again.';
+    default: return 'Failed to fetch a real quote from Arc App Kit.';
+  }
+}
+
+function swapErrorMessage(err) {
+  switch (err?.code) {
+    case 'user_rejected': return 'Transaction rejected by user in wallet.';
+    case 'insufficient_balance': return 'Insufficient USDC balance for this swap.';
+    case 'route_unavailable': return 'Swap route unavailable — Arc Testnet liquidity may be thin.';
+    case 'slippage_exceeded': return 'Price moved beyond your slippage tolerance. Try again.';
+    case 'quote_expired': return 'Quote expired. Requesting a new one.';
+    case 'network_error': return 'Network or RPC error during swap execution.';
+    default: return err?.raw?.message || err?.message || 'Transaction execution failed on Arc Testnet.';
+  }
 }
