@@ -154,6 +154,7 @@ export async function switchToArcTestnet() {
  */
 export function subscribeToWalletEvents({ onAccountsChanged, onChainChanged } = {}) {
   let injected;
+
   try {
     injected = getEip1193Provider();
   } catch {
@@ -161,14 +162,18 @@ export function subscribeToWalletEvents({ onAccountsChanged, onChainChanged } = 
   }
 
   const handleAccountsChanged = (accounts) => {
+    circleAdapter = null;
+
     if (accounts.length === 0) {
       // User disconnected all accounts from the wallet UI.
       disconnectWallet();
     }
+
     onAccountsChanged?.(accounts);
   };
 
   const handleChainChanged = (chainIdHex) => {
+    circleAdapter = null;
     onChainChanged?.(Number(chainIdHex));
   };
 

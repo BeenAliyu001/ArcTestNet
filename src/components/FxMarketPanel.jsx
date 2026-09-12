@@ -4,7 +4,7 @@ import { getEurUsdReference } from '../services/fxMarketData';
 import { ARC_TESTNET } from '../config/arc';
 
 const RATE_POLL_MS = 30000;
-const FX_REFERENCE_POLL_MS = 15 * 60 * 1000; // ECB updates once/day — no need to poll often
+const FX_REFERENCE_POLL_MS = 15 * 60 * 1000;
 
 export default function FxMarketPanel({ wallet }) {
   const { account, isCorrectNetwork } = wallet ?? {};
@@ -22,9 +22,10 @@ export default function FxMarketPanel({ wallet }) {
     setIsLoadingRate(true);
     setRateError(null);
     try {
-      // Real 1 USDC -> EURC estimate from App Kit, same call FxSwapCard uses.
       const result = await getQuote({ tokenIn: 'USDC', tokenOut: 'EURC', amountIn: '1' });
-      setRate(Number(result.estimatedOutput.amount));
+      const amount = Number(result?.estimatedOutput?.amount); // ← FIX
+      if (!Number.isFinite(amount)) throw new Error('invalid quote'); // ← FIX
+      setRate(amount);
       setLastUpdated(new Date());
     } catch (err) {
       setRateError(err?.code === 'route_unavailable'
@@ -38,9 +39,14 @@ export default function FxMarketPanel({ wallet }) {
   const fetchFxReference = useCallback(async () => {
     try {
       const ref = await getEurUsdReference();
+      // ← FIX: validate the payload, don't trust shape
+      if (!ref || !Number.isFinite(ref.rate) || !Number.isFinite(ref.changePct)) {
+        throw new Error('invalid reference data');
+      }
       setFxRef(ref);
       setFxRefError(null);
     } catch (err) {
+      setFxRef(null); // ← FIX: clear stale/invalid ref
       setFxRefError('EUR/USD reference unavailable');
     }
   }, []);
@@ -56,8 +62,6 @@ export default function FxMarketPanel({ wallet }) {
     return () => clearInterval(id);
   }, [canFetchLiveRate, fetchRate]);
 
-  // EUR/USD reference doesn't need a wallet — it's a fiat-side FX API call,
-  // independent of App Kit / the connected wallet.
   useEffect(() => {
     fetchFxReference();
     const id = setInterval(fetchFxReference, FX_REFERENCE_POLL_MS);
@@ -66,7 +70,6 @@ export default function FxMarketPanel({ wallet }) {
 
   return (
     <div className="space-y-6">
-      {/* FX Market Metrics Card */}
       <div className="bg-arc-card border border-arc-border rounded-lg p-5">
         <div className="flex justify-between items-center mb-4 border-b border-arc-border pb-3">
           <h3 className="text-xs font-mono uppercase tracking-wider text-arc-textBright font-semibold">
@@ -89,29 +92,22 @@ export default function FxMarketPanel({ wallet }) {
             <span className="text-lg font-bold text-arc-textBright">
               {!canFetchLiveRate
                 ? '—'
-                : isLoadingRate && rate === null
+                : rate === null && (isLoadingRate || !rateError)   // ← FIX: check rate first
                 ? 'Loading…'
                 : rateError
                 ? 'Unavailable'
-                : `${rate.toFixed(4)} EURC`}
+                : `${rate?.toFixed(4) ?? '—'} EURC`}              {/* ← FIX: optional chain */}
             </span>
           </div>
           <div className="bg-arc-bg p-3 rounded border border-arc-border">
             <span className="text-arc-textMuted block mb-1">EUR/USD REF (ECB)</span>
-            {/* Real day-over-day change from Frankfurter/ECB — NOT an
-                intraday high/low. The ECB publishes one reference rate per
-                business day, so a true 24h high/low isn't available from
-                this free source without a paid tick-data provider. Showing
-                a fabricated high/low would violate the same rule this
-                whole component exists to fix — so this shows the real
-                thing that IS available instead. */}
             {fxRefError ? (
               <span className="text-arc-textMuted text-xs">{fxRefError}</span>
             ) : fxRef ? (
               <span className={`text-lg font-bold ${fxRef.changePct >= 0 ? 'text-arc-green' : 'text-arc-red'}`}>
-                {fxRef.rate.toFixed(4)}{' '}
+                {fxRef.rate?.toFixed(4) ?? '—'}{' '}                {/* ← FIX: optional chain */}
                 <span className="text-xs font-normal">
-                  ({fxRef.changePct >= 0 ? '+' : ''}{fxRef.changePct.toFixed(2)}%)
+                  ({fxRef.changePct >= 0 ? '+' : ''}{fxRef.changePct?.toFixed(2) ?? '0.00'}%)
                 </span>
               </span>
             ) : (
@@ -146,7 +142,7 @@ export default function FxMarketPanel({ wallet }) {
         </div>
       </div>
 
-      {/* Arc Network Panel — verified facts only, no invented live metrics */}
+      {/* Arc Network Panel — unchanged */}
       <div className="bg-arc-card border border-arc-border rounded-lg p-5">
         <h3 className="text-xs font-mono uppercase tracking-wider text-arc-textBright font-semibold mb-4 border-b border-arc-border pb-3">
           ARC NETWORK
@@ -166,10 +162,6 @@ export default function FxMarketPanel({ wallet }) {
           </div>
           <div className="flex justify-between text-arc-textMuted">
             <span>FINALITY</span>
-            {/* Arc's own docs state sub-second finality as a network
-                characteristic — this is not a live per-tx measurement,
-                just the documented design property. Don't replace this
-                with a fabricated specific number like "0.73s". */}
             <span className="text-arc-green">Sub-second (per Arc network docs)</span>
           </div>
         </div>
