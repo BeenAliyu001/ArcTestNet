@@ -1,4 +1,4 @@
-import  { useState } from 'react';
+import { useState } from 'react';
 import Header from './components/Header';
 import FxSwapCard from './components/FxSwapCard';
 import SettlementHistory from './components/SettlementHistory';
@@ -53,12 +53,12 @@ export default function App() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             <FxSwapCard wallet={wallet} balances={balances} onSwapSuccess={handleSwapSuccess} />
-            <FxChartCard />
+            <FxChartCard wallet={wallet} />
             <SettlementHistory transactions={transactions} />
           </div>
 
           <div className="lg:col-span-1">
-            <FxMarketPanel />
+            <FxMarketPanel wallet={wallet} />
           </div>
         </div>
       </main>

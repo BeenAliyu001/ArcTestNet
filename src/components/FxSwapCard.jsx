@@ -1,12 +1,11 @@
-import  { useState, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import { ARC_TOKENS, ARC_TESTNET_PARAMS } from '../constants/arcNetwork';
 import { getQuote, executeSwap } from '../services/swap';
-import { getBalances } from '../services/balances';
 
 // Debounce quote requests while the user is still typing.
 const QUOTE_DEBOUNCE_MS = 400;
 
-export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalancesRefresh }) {
+export default function FxSwapCard({ wallet, balances, onSwapSuccess }) {
   const { account, isCorrectNetwork } = wallet;
 
   const [payAmount, setPayAmount] = useState('');
@@ -19,6 +18,11 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalances
 
   const debounceRef = useRef(null);
   const quoteRequestId = useRef(0);
+
+  const payAmountNum = Number(payAmount);
+  const availableUsdc = Number(balances[ARC_TOKENS.USDC.symbol] ?? 0);
+  const insufficientBalance =
+    payAmount !== '' && !Number.isNaN(payAmountNum) && payAmountNum > availableUsdc;
 
   // Phase 4: Real FX Quote — via App Kit's estimateSwap, never a frontend calculation.
   const handleAmountChange = (e) => {
@@ -71,6 +75,10 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalances
       return;
     }
     if (!quote) return;
+    if (insufficientBalance) {
+      setErrorMsg(`Insufficient USDC balance. You have ${availableUsdc} USDC.`);
+      return;
+    }
 
     setErrorMsg(null);
     setTxHash(null);
@@ -109,11 +117,9 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalances
       };
       onSwapSuccess?.(newTxRecord);
 
-      // Phase 3: refresh real balances after a successful transaction.
-      if (settled) {
-        const fresh = await getBalances(account);
-        onBalancesRefresh?.(fresh);
-      }
+      // Balance refresh after a settled swap is owned by the parent
+      // (App.jsx's useTokenBalances, triggered via onSwapSuccess below) —
+      // not duplicated here.
     } catch (err) {
       console.error('Swap Execution Error:', err);
       setTxStatus('FAILED');
@@ -154,6 +160,11 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalances
             USDC
           </div>
         </div>
+        {insufficientBalance && (
+          <div className="mt-2 text-[11px] font-mono text-arc-red">
+            Exceeds available balance ({availableUsdc} USDC)
+          </div>
+        )}
       </div>
 
       {/* Swap Arrow Indicator */}
@@ -237,7 +248,7 @@ export default function FxSwapCard({ wallet, balances, onSwapSuccess, onBalances
       ) : (
         <button
           onClick={handleExecuteSwap}
-          disabled={!quote || Number(payAmount) <= 0 || isBusy}
+          disabled={!quote || Number(payAmount) <= 0 || isBusy || insufficientBalance}
           className="w-full bg-arc-accent hover:bg-blue-600 disabled:opacity-40 disabled:hover:bg-arc-accent text-white font-mono py-3 rounded text-xs font-bold uppercase transition-colors"
         >
           {txStatus === 'AWAITING_APPROVAL' ? 'APPROVE IN WALLET...' :
